@@ -117,6 +117,186 @@ func TestCWDBindingRouteNotReadyReadFileIsLabeled(t *testing.T) {
 		"single-family fallback names the primary base graph it answered from")
 }
 
+// TestCWDBindingRouteNotReadySoleRepoMutationRefusesLoudly pins the same
+// defence in a single-repo topology, where a bare (unprefixed) path anchors
+// directly via resolveFilePath's soleTrackedRepo branch instead of being
+// refused as ambiguous. The route-not-ready refusal happens in the outer
+// middleware before that branch is ever reached, so the sole-repo shortcut
+// must not bypass it.
+func TestCWDBindingRouteNotReadySoleRepoMutationRefusesLoudly(t *testing.T) {
+	stack := newViewStackWithRepos(t, false)
+	retireRoute(t, stack)
+
+	require.NoError(t, os.WriteFile(filepath.Join(stack.worktreeRoot, "edit.go"),
+		[]byte("package repo\n\n// worktree copy\n"), 0o644))
+
+	result, err := editFileViaMiddleware(stack, stack.worktreeRoot, map[string]any{
+		"path":       "edit.go",
+		"old_string": "func Old() {}",
+		"new_string": "func Never() {}",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.IsError,
+		"a mutation on an unrouted sole-repo checkout must refuse, not silently use base via the soleTrackedRepo shortcut")
+	text := viewResultText(t, result)
+	require.Contains(t, text, graphview.CodeViewBuilding,
+		"refusal must carry view_building, got: %s", text)
+
+	mainAfter, readErr := os.ReadFile(filepath.Join(stack.repoRoot, "edit.go"))
+	require.NoError(t, readErr)
+	require.NotContains(t, string(mainAfter), "func Never() {}",
+		"the refused edit still wrote the MAIN copy")
+	worktreeAfter, readErr := os.ReadFile(filepath.Join(stack.worktreeRoot, "edit.go"))
+	require.NoError(t, readErr)
+	require.NotContains(t, string(worktreeAfter), "func Never() {}",
+		"the refused edit still wrote the worktree copy")
+}
+
+func batchEditViaMiddleware(stack *viewStack, cwd string, edits []map[string]any) (*mcplib.CallToolResult, error) {
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "batch_edit"
+	req.Params.Arguments = map[string]any{"edits": edits}
+	ctx := WithAuthorizedToolCall(
+		WithSessionCWD(WithSessionID(context.Background(), viewTestSession), cwd),
+		"batch_edit")
+	return stack.srv.wrapToolHandler(stack.srv.handleAtomicBatchEdit)(ctx, req)
+}
+
+// TestCWDBindingRouteNotReadyBatchEditRefusesLoudly pins the same defence for
+// batch_edit, which drives handleAtomicBatchEdit (batch_transaction.go:1356)
+// rather than handleEditFile directly.
+func TestCWDBindingRouteNotReadyBatchEditRefusesLoudly(t *testing.T) {
+	stack := newViewStack(t)
+	retireRoute(t, stack)
+
+	require.NoError(t, os.WriteFile(filepath.Join(stack.worktreeRoot, "edit.go"),
+		[]byte("package repo\n\n// worktree copy\n"), 0o644))
+
+	result, err := batchEditViaMiddleware(stack, stack.worktreeRoot, []map[string]any{
+		{"op": "edit_file", "path": "repo/edit.go", "old_string": "func Old() {}", "new_string": "func Never() {}"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.IsError,
+		"a batch_edit on an unrouted checkout must refuse, not silently use base")
+	text := viewResultText(t, result)
+	require.Contains(t, text, graphview.CodeViewBuilding,
+		"refusal must carry view_building, got: %s", text)
+
+	mainAfter, readErr := os.ReadFile(filepath.Join(stack.repoRoot, "edit.go"))
+	require.NoError(t, readErr)
+	require.NotContains(t, string(mainAfter), "func Never() {}",
+		"the refused batch edit still wrote the MAIN copy")
+}
+
+func writeFileViaMiddleware(stack *viewStack, cwd string, args map[string]any) (*mcplib.CallToolResult, error) {
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "write_file"
+	req.Params.Arguments = args
+	ctx := WithAuthorizedToolCall(
+		WithSessionCWD(WithSessionID(context.Background(), viewTestSession), cwd),
+		"write_file")
+	return stack.srv.wrapToolHandler(stack.srv.handleWriteFile)(ctx, req)
+}
+
+func editSymbolViaMiddleware(stack *viewStack, cwd string, args map[string]any) (*mcplib.CallToolResult, error) {
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "edit_symbol"
+	req.Params.Arguments = args
+	ctx := WithAuthorizedToolCall(
+		WithSessionCWD(WithSessionID(context.Background(), viewTestSession), cwd),
+		"edit_symbol")
+	return stack.srv.wrapToolHandler(stack.srv.handleEditSymbol)(ctx, req)
+}
+
+// TestCWDBindingRouteNotReadyWriteAndEditSymbolRefuseLoudly pins parity
+// across the remaining source-mutating legacy tools: write_file
+// (tools_fileops.go:970) and edit_symbol (tools_coding.go:2909) must refuse
+// exactly like edit_file rather than falling through to base.
+func TestCWDBindingRouteNotReadyWriteAndEditSymbolRefuseLoudly(t *testing.T) {
+	stack := newViewStack(t)
+	retireRoute(t, stack)
+
+	t.Run("write_file", func(t *testing.T) {
+		result, err := writeFileViaMiddleware(stack, stack.worktreeRoot, map[string]any{
+			"path":    "repo/added.go",
+			"content": "package repo\n\nfunc Never() {}\n",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.True(t, result.IsError,
+			"a write on an unrouted checkout must refuse, not silently use base")
+		text := viewResultText(t, result)
+		require.Contains(t, text, graphview.CodeViewBuilding,
+			"refusal must carry view_building, got: %s", text)
+		_, statErr := os.Stat(filepath.Join(stack.repoRoot, "added.go"))
+		require.True(t, os.IsNotExist(statErr), "the refused write still created the MAIN copy")
+	})
+
+	t.Run("edit_symbol", func(t *testing.T) {
+		result, err := editSymbolViaMiddleware(stack, stack.worktreeRoot, map[string]any{
+			"id":         "repo/edit.go::New",
+			"old_source": "func New() {}",
+			"new_source": "func Never() {}",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.True(t, result.IsError,
+			"an edit_symbol on an unrouted checkout must refuse, not silently use base")
+		text := viewResultText(t, result)
+		require.Contains(t, text, graphview.CodeViewBuilding,
+			"refusal must carry view_building, got: %s", text)
+		mainAfter, readErr := os.ReadFile(filepath.Join(stack.repoRoot, "edit.go"))
+		require.NoError(t, readErr)
+		require.NotContains(t, string(mainAfter), "func Never() {}",
+			"the refused edit_symbol still wrote the MAIN copy")
+	})
+}
+
+// TestCWDBindingRouteNotReadyMissingMarkerFailsOpenToReadOnly pins the
+// fail-open path: without WithAuthorizedToolCall, requestIsMutationFromContext
+// cannot see the tool name, so viewForSessionCWD takes the read posture and
+// soft-falls-back to base with an inexact rider instead of refusing outright.
+// The second gate, refuseRoutedViewMutation, keys off the tool name on the
+// request itself (not the context marker) and still refuses the write —
+// zero bytes must move either way.
+func TestCWDBindingRouteNotReadyMissingMarkerFailsOpenToReadOnly(t *testing.T) {
+	stack := newViewStack(t)
+	retireRoute(t, stack)
+
+	require.NoError(t, os.WriteFile(filepath.Join(stack.worktreeRoot, "edit.go"),
+		[]byte("package repo\n\n// worktree copy\n"), 0o644))
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "edit_file"
+	req.Params.Arguments = map[string]any{
+		"path":       "repo/edit.go",
+		"old_string": "func Old() {}",
+		"new_string": "func Never() {}",
+	}
+	ctx := WithSessionCWD(WithSessionID(context.Background(), viewTestSession), stack.worktreeRoot)
+	result, err := stack.srv.wrapToolHandler(stack.srv.handleEditFile)(ctx, req)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.IsError,
+		"a marker-less edit on an unrouted checkout must still refuse, via the read-only gate")
+	text := viewResultText(t, result)
+	require.NotContains(t, text, graphview.CodeViewBuilding,
+		"no authorized-call marker means no top-level view_building refusal, got: %s", text)
+	require.Contains(t, text, graphview.CodeViewReadOnly,
+		"the second gate (refuseRoutedViewMutation) must catch the marker-less mutation: %s", text)
+
+	mainAfter, readErr := os.ReadFile(filepath.Join(stack.repoRoot, "edit.go"))
+	require.NoError(t, readErr)
+	require.NotContains(t, string(mainAfter), "func Never() {}",
+		"the fail-open path still wrote the MAIN copy")
+	worktreeAfter, readErr := os.ReadFile(filepath.Join(stack.worktreeRoot, "edit.go"))
+	require.NoError(t, readErr)
+	require.NotContains(t, string(worktreeAfter), "func Never() {}",
+		"the fail-open path still wrote the worktree copy")
+}
+
 func TestCWDBindingRouteNotReadyReadsFallBackWithRider(t *testing.T) {
 	stack := newViewStack(t)
 	retireRoute(t, stack)

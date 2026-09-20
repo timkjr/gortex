@@ -100,14 +100,29 @@ func writeViewRepo(t *testing.T, dir, workspace string, files map[string]string)
 // make the worktree an automatic checkout of the indexed family.
 func newViewStack(t *testing.T) *viewStack {
 	t.Helper()
+	return newViewStackWithRepos(t, true)
+}
+
+// newViewStackWithRepos is newViewStack's fixture, optionally without the
+// sibling "other" repo. Excluding it makes "repo" the sole tracked repo —
+// the topology resolveFilePath's sole-repo branch (tools_fileops.go:103-116)
+// needs to anchor a bare repo-relative path directly, unreachable when a
+// second repo is tracked (a bare path is then ambiguous between them).
+func newViewStackWithRepos(t *testing.T, includeOther bool) *viewStack {
+	t.Helper()
 	base := t.TempDir()
 	repoRoot := writeViewRepo(t, filepath.Join(base, "repo"), "main-ws", map[string]string{
 		"edit.go": "package repo\n\nfunc Old() {}\n",
 		"keep.go": "package repo\n\nfunc Keeper() {}\n",
 	})
-	otherRoot := writeViewRepo(t, filepath.Join(base, "other"), "other-ws", map[string]string{
-		"other.go": "package other\n\nfunc Other() {}\n",
-	})
+	repos := []config.RepoEntry{{Path: repoRoot, Name: "repo"}}
+	var otherRoot string
+	if includeOther {
+		otherRoot = writeViewRepo(t, filepath.Join(base, "other"), "other-ws", map[string]string{
+			"other.go": "package other\n\nfunc Other() {}\n",
+		})
+		repos = append(repos, config.RepoEntry{Path: otherRoot, Name: "other"})
+	}
 	worktreeRoot := filepath.Join(base, "wt")
 	if err := os.MkdirAll(worktreeRoot, 0o755); err != nil {
 		t.Fatalf("mkdir worktree: %v", err)
@@ -121,10 +136,7 @@ func newViewStack(t *testing.T) *viewStack {
 	t.Cleanup(func() { _ = store.Close() })
 
 	cfgPath := filepath.Join(base, "config.yaml")
-	gc := &config.GlobalConfig{Repos: []config.RepoEntry{
-		{Path: repoRoot, Name: "repo"},
-		{Path: otherRoot, Name: "other"},
-	}}
+	gc := &config.GlobalConfig{Repos: repos}
 	gc.SetConfigPath(cfgPath)
 	if err := gc.Save(); err != nil {
 		t.Fatalf("save config: %v", err)
