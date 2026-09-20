@@ -254,6 +254,60 @@ func TestCWDBindingRouteNotReadyWriteAndEditSymbolRefuseLoudly(t *testing.T) {
 	})
 }
 
+// TestCWDBindingRouteNotReadyRefactorFacadeRefusesLoudly extends the same
+// defence to the "refactor" facade — sourceMutatingFacades' other member
+// (facade_registry.go:166), covering apply_code_action, safe_delete_symbol,
+// fix_all_in_file, inline_symbol, move_symbol, and rename_symbol
+// (facade_registry.go:387-390). Every prior test in this file exercises only
+// the "edit" facade; nothing pinned that the same refusal reaches this
+// sibling. Each of these tools is registered through s.addTool, which wraps
+// it in the identical s.wrapToolHandler(handler) chain edit_file goes
+// through (server.go:3241-3247), so the route-not-ready refusal fires in the
+// outer middleware (resolveRequestView -> viewForSessionCWD) before any of
+// these handlers run — well before argument validation, which is why
+// deliberately empty/minimal args are enough here.
+func TestCWDBindingRouteNotReadyRefactorFacadeRefusesLoudly(t *testing.T) {
+	stack := newViewStack(t)
+	retireRoute(t, stack)
+
+	cases := []struct {
+		tool    string
+		args    map[string]any
+		handler func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error)
+	}{
+		{tool: "rename_symbol", args: map[string]any{"id": "repo/edit.go::New", "new_name": "Renamed"}, handler: stack.srv.handleRenameSymbol},
+		{tool: "move_symbol", args: map[string]any{"id": "repo/edit.go::New", "destination": "repo/added.go"}, handler: stack.srv.handleMoveSymbol},
+		{tool: "safe_delete_symbol", args: map[string]any{"id": "repo/edit.go::New"}, handler: stack.srv.handleSafeDeleteSymbol},
+		{tool: "inline_symbol", args: map[string]any{"id": "repo/edit.go::New"}, handler: stack.srv.handleInlineSymbol},
+		{tool: "apply_code_action", args: map[string]any{"file": "repo/edit.go", "line": 3, "action": "quickfix"}, handler: stack.srv.handleApplyCodeAction},
+		{tool: "fix_all_in_file", args: map[string]any{"path": "repo/edit.go"}, handler: stack.srv.handleFixAllInFile},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.tool, func(t *testing.T) {
+			req := mcplib.CallToolRequest{}
+			req.Params.Name = tc.tool
+			req.Params.Arguments = tc.args
+			ctx := WithAuthorizedToolCall(
+				WithSessionCWD(WithSessionID(context.Background(), viewTestSession), stack.worktreeRoot),
+				tc.tool)
+			result, err := stack.srv.wrapToolHandler(tc.handler)(ctx, req)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.True(t, result.IsError,
+				"a %s on an unrouted checkout must refuse, not silently use base", tc.tool)
+			text := viewResultText(t, result)
+			require.Contains(t, text, graphview.CodeViewBuilding,
+				"refusal must carry view_building for %s, got: %s", tc.tool, text)
+		})
+	}
+
+	mainAfter, readErr := os.ReadFile(filepath.Join(stack.repoRoot, "edit.go"))
+	require.NoError(t, readErr)
+	require.NotContains(t, string(mainAfter), "Renamed",
+		"a refused refactor-facade mutation still wrote the MAIN copy")
+}
+
 // TestCWDBindingRouteNotReadyMissingMarkerFailsOpenToReadOnly pins the
 // fail-open path: without WithAuthorizedToolCall, requestIsMutationFromContext
 // cannot see the tool name, so viewForSessionCWD takes the read posture and
