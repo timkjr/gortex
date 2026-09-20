@@ -575,7 +575,8 @@ func (s *Server) viewForSessionCWD(ctx context.Context) (*requestView, error) {
 			return nil, graphview.NewViewError(graphview.CodeViewBuilding,
 				fmt.Sprintf("checkout %q is not fully routed yet", checkout.CheckoutID))
 		}
-		rider := graphview.NewViewRider(graphview.Selector{Kind: graphview.SelectorAuto})
+		rider := graphview.NewViewRider(graphview.Selector{Kind: graphview.SelectorWorktree, CheckoutID: checkout.CheckoutID})
+		rider.GraphID = route.GraphID
 		rider.CheckoutID = checkout.CheckoutID
 		if markErr := rider.MarkFallback(string(graphview.SelectorBase), graphview.CodeViewBuilding); markErr != nil {
 			return nil, markErr

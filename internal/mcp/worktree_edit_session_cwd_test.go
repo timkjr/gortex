@@ -85,6 +85,38 @@ func TestCWDBindingRouteNotReadyMutationsRefuseLoudly(t *testing.T) {
 		"the refused edit still wrote the worktree copy")
 }
 
+// TestCWDBindingRouteNotReadyReadFileIsLabeled pins the incident's read
+// twin: a read_file with a repo-prefixed path from a worktree-anchored
+// session whose route cannot serve must degrade to base WITH the rider
+// (visible degradation), and the rider must say which checkout the session
+// actually wanted so the client can reconstruct the misroute.
+func TestCWDBindingRouteNotReadyReadFileIsLabeled(t *testing.T) {
+	stack := newViewStack(t)
+	retireRoute(t, stack)
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"path": "repo/edit.go"}
+	ctx := WithSessionCWD(WithSessionID(context.Background(), viewTestSession), stack.worktreeRoot)
+	res, err := stack.srv.wrapToolHandler(stack.srv.handleReadFile)(ctx, req)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.False(t, res.IsError, "a prefixed read may degrade to base: %s", viewResultText(t, res))
+
+	// The bytes themselves come from the base corpus (main checkout's index
+	// state) — that is the declared degradation. What must NOT happen is an
+	// exact-looking answer: the rider says so.
+	rider := resultFreshness(t, res)
+	require.NotNil(t, rider, "degraded read_file must say so on the rider")
+	require.Equal(t, "worktree:"+viewTestWorktree, rider["requested_view"],
+		"the rider must name the checkout the session actually bound, not just auto")
+	require.Equal(t, false, rider["exact"])
+	require.Equal(t, graphview.CodeViewBuilding, rider["fallback_reason"])
+	require.Equal(t, viewTestWorktree, rider["checkout_id"],
+		"rider must name the checkout the cwd wanted, so the client sees the misroute")
+	require.NotEqual(t, "", rider["graph_id"],
+		"single-family fallback names the primary base graph it answered from")
+}
+
 func TestCWDBindingRouteNotReadyReadsFallBackWithRider(t *testing.T) {
 	stack := newViewStack(t)
 	retireRoute(t, stack)
