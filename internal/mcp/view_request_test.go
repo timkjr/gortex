@@ -105,9 +105,13 @@ func newViewStack(t *testing.T) *viewStack {
 
 // newViewStackWithRepos is newViewStack's fixture, optionally without the
 // sibling "other" repo. Excluding it makes "repo" the sole tracked repo —
-// the topology resolveFilePath's sole-repo branch (tools_fileops.go:103-116)
-// needs to anchor a bare repo-relative path directly, unreachable when a
-// second repo is tracked (a bare path is then ambiguous between them).
+// the topology that would let resolveFilePath's sole-repo branch
+// (tools_fileops.go:103-116) anchor a bare repo-relative path directly
+// instead of refusing it as ambiguous. Used by
+// TestCWDBindingRouteNotReadySoleRepoMutationRefusesLoudly to prove the
+// route-not-ready refusal is topology-independent: it fires in the outer
+// middleware before a handler ever reaches resolveFilePath, so a sole-repo
+// bare path gets no shortcut past it.
 func newViewStackWithRepos(t *testing.T, includeOther bool) *viewStack {
 	t.Helper()
 	base := t.TempDir()
